@@ -379,6 +379,27 @@ brief it to hunt named failure modes: *find every caller of the signature I
 changed; find the other copy of the list I edited; tell me what a user with a
 stale cache sees.*
 
+### Spar with reviewers until it lands
+
+A reviewer comment on a PR — human or AI — is the start of a conversation, not
+a verdict. **The agent owns the PR until it is live**, so it goes back and
+forth with the reviewer until the change lands:
+
+1. **Answer every comment.** Either fix it and push, or reply with the concrete
+   reason it should stand. Never leave a comment hanging, and never dismiss one
+   silently.
+2. **Re-request review after pushing**, and say in the thread what changed.
+3. **Repeat** until the reviewer approves, then take it the rest of the way to
+   live. A wrong objection is answered with evidence (a test, a measurement, a
+   pointer to the caller), not ignored.
+4. **Stalemate goes to the owner.** If after a genuine exchange the reviewer
+   still blocks and the agent still believes it is right, put the disagreement
+   on the ticket with both positions and a recommendation. That is the only
+   exit; abandoning the PR is not one.
+
+A PR parked on unanswered review feedback is the GitHub version of a ticket
+rotting in a column: it reads as nobody is on it.
+
 ## Local overrides: INTERNAL.md
 
 If an `INTERNAL.md` exists next to this file, **read it immediately after this
