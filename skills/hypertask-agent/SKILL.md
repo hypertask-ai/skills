@@ -369,6 +369,15 @@ brief it to hunt named failure modes: *find every caller of the signature I
 changed; find the other copy of the list I edited; tell me what a user with a
 stale cache sees.*
 
+## Local overrides: INTERNAL.md
+
+If an `INTERNAL.md` exists next to this file, **read it immediately after this
+one and treat it as part of the skill.** It carries your organisation's
+specifics: board profiles (column names and what they permit), teammate-agent
+ids and lanes, incident lessons, and any rule that overrides a default here.
+This file stays generic; INTERNAL.md is where a deployment gets opinionated.
+Never commit INTERNAL.md to a public repo.
+
 ## Still the owner's board
 
 The agent identity changes who is speaking, not the rules. Board hygiene still
