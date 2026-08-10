@@ -1,0 +1,438 @@
+#!/usr/bin/env bash
+# ht-agent — run a Claude Code session under its own Hypertask agent identity.
+#
+#   ht-agent new  <slug> "<Display Name>" <projectId[,projectId...]>
+#   ht-agent say  <slug> <TICKET> '<html>'      post a comment AS the agent
+#   ht-agent take <slug> <TICKET>               assign the agent to a ticket
+#   ht-agent drop <slug> <TICKET>               unassign the agent
+#   ht-agent poll <slug> [label]                new comments since last poll
+#   ht-agent new-tickets <slug> [label]         tickets in scope not seen before
+#   ht-agent hand <slug> <TICKET> <agent-id>    reassign to another agent
+#   ht-agent agents                             list agent ids you can hand to
+#   ht-agent next <slug> [label]                what to work on, due date then priority
+#   ht-agent env  <slug>                        print the export line for the token
+#   ht-agent doctor <slug>                      why is this agent's token failing?
+#
+# Identity lives in ~/.config/hypertask-agents/<slug>.env (0600). The token is
+# shown once at creation, so that file is the only copy: rotate via
+# /api/mcp/agents/rotate-token if it leaks.
+#
+# If calls start returning "Unauthorized", run `ht-agent doctor <slug>`. An agent
+# token is valid only while it matches the one stored on its agent row, so
+# rotating it or re-creating the identity silently kills the old copy.
+set -euo pipefail
+
+DIR="$HOME/.config/hypertask-agents"
+API="https://api.hypertask.ai/api"
+mkdir -p "$DIR"
+
+die() { echo "ht-agent: $*" >&2; exit 1; }
+
+# Owner-level API call. Creating or rotating an agent needs a token belonging to
+# the board OWNER (an MCP token from Hypertask Settings -> API), not an agent
+# token. Set HT_OWNER_TOKEN once in your shell profile.
+owner() {
+  local method="$1" path="$2" body="${3:-}"
+  [ -n "${HT_OWNER_TOKEN:-}" ] || die "set HT_OWNER_TOKEN (a Hypertask MCP token for the board owner: Settings -> API)"
+  curl -s -X "$method" "$API/mcp$path" \
+    -H "Authorization: Bearer $HT_OWNER_TOKEN" -H 'Content-Type: application/json' \
+    ${body:+-d "$body"}
+}
+load() {
+  local slug="$1"
+  [ -f "$DIR/$slug.env" ] || die "no agent '$slug'. Create one with: ht-agent new $slug \"Name\" 15"
+  set -a; . "$DIR/$slug.env"; set +a
+}
+
+cmd_new() {
+  local slug="${1:?slug}" name="${2:?display name}" projects="${3:?project ids}"
+  [ -f "$DIR/$slug.env" ] && die "agent '$slug' already exists at $DIR/$slug.env"
+  local ids; ids="[$(echo "$projects" | tr ',' ' ' | tr -s ' ' | sed 's/ /,/g')]"
+  local body; body=$(printf '{"display_name":%s,"role":"write","project_ids":%s}' \
+    "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$name")" "$ids")
+  # Only the board owner's token may mint an agent.
+  local out; out=$(owner POST /agents/create "$body")
+  echo "$out" | python3 -c '
+import sys, json, os
+data = json.load(sys.stdin)
+if not data.get("success"):
+    sys.exit("create failed: " + json.dumps(data)[:300])
+slug, name, projects = sys.argv[1], sys.argv[2], sys.argv[3]
+path = os.path.expanduser("~/.config/hypertask-agents/%s.env" % slug)
+with open(path, "w") as handle:
+    handle.write(
+        "# Hypertask agent identity, created by ht-agent\n"
+        "HT_AGENT_NAME=\"%s\"\nHT_AGENT_ID=%s\nHT_AGENT_TOKEN=%s\nHT_AGENT_PROJECTS=%s\n"
+        % (name, data["agent"]["id"], data["token"], projects)
+    )
+os.chmod(path, 0o600)
+print("created %s (%s) -> %s" % (name, data["agent"]["id"], path))
+' "$slug" "$name" "$projects"
+}
+
+cmd_env() { load "$1"; echo "export HT_AGENT_TOKEN=$HT_AGENT_TOKEN HT_AGENT_ID=$HT_AGENT_ID"; }
+
+# The refresh endpoint is the only place that says WHY a token stopped working:
+# superseded by a rotate, revoked, or simply wrong.
+cmd_doctor() {
+  load "$1"
+  curl -s -X POST "$API/mcp/token/refresh" \
+    -H "Authorization: Bearer $HT_AGENT_TOKEN" \
+    -H 'Content-Type: application/json' -d '{}' |
+  python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+if data.get("success"):
+    sys.exit("unexpected: this token refreshed, so it is not an agent token")
+reason = data.get("reason") or "-"
+print("%s\n%s" % (reason, data.get("error") or data.get("message") or ""))
+if reason == "agent_token_superseded":
+    print("\nFix: rotate it and rewrite the env file:")
+    print("  curl -s -X POST \"$API/mcp/agents/rotate-token\" -H \"Authorization: Bearer $HT_OWNER_TOKEN\" -H \x27Content-Type: application/json\x27 -d \x27{\"agent_id\":\"%s\"}\x27" % sys.argv[1])
+' "$HT_AGENT_ID"
+}
+
+cmd_say() {
+  local slug="${1:?slug}" ticket="${2:?TICKET}" html="${3:?html}"
+  load "$slug"
+  local out; out=$(hypertask --token "$HT_AGENT_TOKEN" comment add "$ticket" --text "$html" 2>&1)
+  echo "$out" | tail -2
+  # Record it as seen: the comment API exposes no agent field, so the agent's own
+  # comments look exactly like the owner's and would otherwise poll back as replies.
+  local id; id=$(echo "$out" | grep -o '#comment-[0-9]*' | head -1 | tr -d '#comment-')
+  [ -n "$id" ] && echo "${ticket#*-}:$id" >> "$DIR/$slug.seen"
+  return 0
+}
+
+# assign_self is the only way an agent assigns itself. Address the ticket by
+# project_id + unique_index: task_id is an INTERNAL id, and passing a ticket
+# number there silently writes to an unrelated task.
+assign() {
+  local intent="$1" ticket="$2" project="${3:-15}"
+  curl -s -X POST "$API/mcp/assignees/assign" \
+    -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" \
+    -d "{\"project_id\":$project,\"unique_index\":${ticket#*-},\"assign_self\":true,\"intent\":\"$intent\"}" \
+  | python3 -c '
+import sys, json
+data = json.load(sys.stdin)
+if not data.get("success"):
+    sys.exit("failed: " + str(data.get("error")))
+print(data.get("assignStatus"))'
+}
+cmd_take() { load "${1:?slug}"; assign assign   "${2:?TICKET}" "${HT_AGENT_PROJECTS%%,*}"; }
+cmd_drop() { load "${1:?slug}"; assign unassign "${2:?TICKET}" "${HT_AGENT_PROJECTS%%,*}"; }
+
+# Hand a ticket to a different agent, e.g. filing a CLI/API bug against the agent
+# that owns that surface. The route takes agent_id; only the CLI cannot.
+#
+# A hand REPLACES the agent owner. The route is additive and no GET exposes agent
+# assignees, so the assign response is the only place the full list appears:
+# assign the target, then unassign every other agent it reports back.
+# Pass --add as a 4th arg to keep the existing agents instead.
+cmd_hand() {
+  local slug="${1:?slug}" ticket="${2:?TICKET}" target="${3:?target agent id}" mode="${4:-}"
+  load "$slug"
+  local project="${HT_AGENT_PROJECTS%%,*}" index="${ticket#*-}" stale others
+  others=$(curl -s -X POST "$API/mcp/assignees/assign" \
+    -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" \
+    -d "{\"project_id\":$project,\"unique_index\":$index,\"agent_id\":\"$target\",\"intent\":\"assign\"}" \
+  | TARGET="$target" python3 -c '
+import os, sys, json
+data = json.load(sys.stdin)
+if not data.get("success"):
+    sys.exit("failed: " + str(data.get("error")))
+names, stale = [], []
+for a in data.get("assignees") or []:
+    agent = a.get("agent") or {}
+    aid = agent.get("id") or agent.get("agentId")
+    names.append(agent.get("displayName") or ("user" + str(a.get("userId"))))
+    if aid and aid != os.environ["TARGET"]:
+        stale.append(aid)
+print(", ".join(names), file=sys.stderr)
+print("\n".join(stale))') || return 1
+  [ "$mode" = "--add" ] && return 0
+  while read -r stale; do
+    [ -n "$stale" ] || continue
+    hypertask --token "$HT_AGENT_TOKEN" tasks unassign "$ticket" --assignee "$stale" >/dev/null 2>&1 \
+      && echo "dropped previous agent $stale" >&2
+  done <<< "$others"
+}
+
+# What to work next: due date first, then priority. The owner sets these instead of
+# telling each agent what to do, so they are instructions, not decoration.
+cmd_next() {
+  local slug="${1:?slug}" label="${2:-}"
+  load "$slug"
+  # Two passes: the label defines the agent's topic area, but tickets assigned
+  # to this agent count regardless of label. Filtering on label alone hid 8
+  # assigned tickets for a whole session.
+  local labelled="{}" assigned="{}"
+  if [ -n "$label" ]; then
+    labelled=$(hypertask --token "$HT_AGENT_TOKEN" --json tasks list \
+      --project "${HT_AGENT_PROJECTS%%,*}" --limit 100 --label "$label" 2>/dev/null)
+  fi
+  assigned=$(hypertask --token "$HT_AGENT_TOKEN" --json tasks list \
+    --project "${HT_AGENT_PROJECTS%%,*}" --limit 100 2>/dev/null)
+  printf '%s\n\x00\n%s\n' "$labelled" "$assigned" | python3 -c '
+import os, sys, json
+from datetime import datetime, timezone
+
+RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
+# Sections that mean the work is finished. QA Verified is one: leaving it out
+# surfaced completed tickets at the top of `next` for days.
+DONE = {"Done", "Archive", "Archived", "QA Verified", "Announce"}
+today = datetime.now(timezone.utc).date()
+rows = []
+
+raw = sys.stdin.read().split("\x00")
+def load(chunk):
+    try: return json.loads(chunk.strip() or "{}").get("tasks") or []
+    except Exception: return []
+labelled = load(raw[0])
+everything = load(raw[1]) if len(raw) > 1 else []
+agent_id = (os.environ.get("HT_AGENT_ID") or "").strip()
+
+def mine(task):
+    for a in task.get("assignees") or []:
+        if ((a.get("agent") or {}).get("id") or "") == agent_id:
+            return True
+    return False
+
+seen_ids = set()
+candidates = []
+for task in labelled + [t for t in everything if mine(t)]:
+    key = task.get("ticketNumber") or task.get("id")
+    if key in seen_ids:
+        continue
+    seen_ids.add(key)
+    candidates.append(task)
+
+for task in candidates:
+    if (task.get("section") or "") in DONE:
+        continue
+    due = task.get("dueDate") or task.get("due_date")
+    day = None
+    if due:
+        try:
+            day = datetime.fromisoformat(str(due).replace("Z", "+00:00")).date()
+        except ValueError:
+            day = None
+    priority = task.get("priority") or "-"
+    # Dated work outranks undated work, oldest due date first, then priority.
+    rows.append(((0, day) if day else (1, None), RANK.get(priority, 9), task, day))
+
+rows.sort(key=lambda row: (row[0][0], row[0][1] or today, row[1]))
+for bucket, _rank, task, day in rows[:20]:
+    when = "no due date"
+    if day:
+        overdue = (today - day).days
+        when = str(day) + (" OVERDUE by %dd" % overdue if overdue > 0 else "")
+    print("%-11s %-10s %-22s %s" % (task.get("ticketNumber"), task.get("priority") or "-",
+                                    when, str(task.get("title"))[:70]))
+'
+}
+
+# Who can work be handed to?
+cmd_agents() {
+  owner GET /user/context | python3 -c '
+import sys, json
+for agent in json.load(sys.stdin).get("all_agents") or []:
+    print(agent.get("id"), "|", agent.get("displayName"))'
+}
+
+# Tickets in the agent's scope it has not seen before: the "new work" half of the
+# loop, next to `poll` which watches for replies.
+cmd_new_tickets() {
+  local slug="${1:?slug}" label="${2:-}"
+  load "$slug"
+  local state="$DIR/$slug.tickets"
+  touch "$state"
+  local args=(--token "$HT_AGENT_TOKEN" --json tasks list --project "${HT_AGENT_PROJECTS%%,*}" --limit 100)
+  [ -n "$label" ] && args+=(--label "$label")
+  hypertask "${args[@]}" 2>/dev/null | python3 -c '
+import sys, json
+state = sys.argv[1]
+seen = set(open(state).read().split())
+fresh = []
+for task in json.load(sys.stdin).get("tasks") or []:
+    ticket = task.get("ticketNumber")
+    if not ticket or ticket in seen:
+        continue
+    seen.add(ticket)
+    fresh.append("NEW %s [%s] %s" % (ticket, task.get("section"), str(task.get("title"))[:90]))
+with open(state, "w") as handle:
+    handle.write("\n".join(sorted(seen)) + "\n")
+print("\n".join(fresh), end="")
+' "$state"
+}
+
+# Polls the agent's tickets for comments it has not seen.
+#
+# Deliberately NOT the Hypertask inbox: an agent token carries its owner's userId,
+# so `inbox list` returns the OWNER's inbox across every board. Reading it is
+# noise and archiving it mutates his real inbox.
+cmd_poll() {
+  local slug="${1:?slug}" label="${2:-}" scope="addressed"
+  [ "${3:-}" = "--all" ] && scope="all"
+  [ "$label" = "--all" ] && { scope="all"; label=""; }
+  load "$slug"
+  local project="${HT_AGENT_PROJECTS%%,*}" state="$DIR/$slug.seen"
+  touch "$state"
+
+  # An @-mention must reach the agent whatever the ticket is tagged. Scoping
+  # this scan by label meant a direct "pls take this urgently" sat unread for
+  # half an hour because the ticket carried Bug and not the agent's own tag.
+  # The label still scopes new-tickets and next; it must never gate a reply.
+  # tasks list comes back newest-updated first, and posting a comment bumps
+  # updatedAt, so the 100 most recent tickets always contain anything someone
+  # just said. Walking the whole board instead costs one CLI call per ticket
+  # and blows past any sane poll interval.
+  # Only tickets touched since the last poll can carry anything new. Fetching
+  # comments for all 100 cost one CLI call each (~65s+) and the run started
+  # getting killed before it finished, which is worse than being slow: a
+  # mention in the tail never surfaced at all.
+  # The watermark only ever moves FORWARD, so a comment that lands while this
+  # agent is not polling is skipped for good: the ticket's updatedAt is already
+  # below the next watermark and its comments are never fetched again. That is
+  # how an approved hand-off ("pls take this on") sat unread for a day while the
+  # agent reported an empty queue.
+  #
+  # So the watermark is only a cost optimisation, not the source of truth: the
+  # .seen file already records every comment id processed, and it is what stops
+  # the agent answering twice. Rewinding the window a fixed distance costs a few
+  # extra comment-list calls and cannot cause a duplicate reply.
+  local watermark="$DIR/$slug.watermark" since=""
+  if [ -f "$watermark" ]; then
+    # How far to rewind depends on whether we have been polling. A steady loop
+    # cannot have missed anything older than a couple of cycles, so it rewinds
+    # cheaply. A watermark that is HOURS stale means nobody polled for hours,
+    # which is exactly when a mention gets lost, so that case pays for a deep
+    # scan once and then falls back to the cheap path.
+    #
+    # This matters: rewinding deep on every poll means ~100 comment-list calls
+    # every cycle, and that rate can trip the platform bot challenge and break
+    # the CLI for every agent on the box.
+    since=$(POLL_REWIND_HOURS="${POLL_REWIND_HOURS:-}" python3 -c '
+import datetime, os, sys
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit()
+try:
+    stamp = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+except ValueError:
+    print(raw)  # unparseable: fall back to the stored value rather than rescanning all
+    sys.exit()
+
+override = os.environ.get("POLL_REWIND_HOURS") or ""
+if override:
+    hours = float(override)
+else:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    staleness = (now - stamp).total_seconds() / 3600
+    # Under an hour since the last poll: a running loop, nothing can have been
+    # missed beyond a cycle or two. Otherwise assume a restart after a gap.
+    hours = 2 if staleness < 1 else 36
+print((stamp - datetime.timedelta(hours=hours)).isoformat().replace("+00:00", "Z"))
+' < "$watermark")
+  fi
+
+  local args=(--token "$HT_AGENT_TOKEN" --json tasks list --project "$project" --limit 100)
+  local tickets
+  # ticketNumber, not uniqueIndex: "HTPR-$index" reads comments from the wrong
+  # board for any non-product-board agent.
+  tickets=$(hypertask "${args[@]}" 2>/dev/null | SINCE="$since" python3 -c '
+import sys, json, os
+since = os.environ.get("SINCE") or ""
+newest = since
+for task in json.load(sys.stdin).get("tasks") or []:
+    updated = task.get("updatedAt") or ""
+    if updated > newest:
+        newest = updated
+    if since and updated and updated <= since:
+        continue
+    if task.get("ticketNumber"):
+        print(task["ticketNumber"])
+sys.stderr.write(newest)
+' 2>"$watermark.next")
+  # Never let the stored watermark move BACKWARDS. `newest` above starts from the
+  # rewound value, so a poll that matched no tickets would otherwise write the
+  # rewound stamp back and the window would creep further back on every run.
+  if [ -s "$watermark.next" ]; then
+    python3 -c '
+import sys
+stored, candidate = sys.argv[1], sys.argv[2]
+try:
+    previous = open(stored).read().strip()
+except OSError:
+    previous = ""
+best = max(previous, candidate.strip())
+if best:
+    open(stored, "w").write(best)
+' "$watermark" "$(cat "$watermark.next")"
+  fi
+  rm -f "$watermark.next"
+
+  for ticket in $tickets; do
+    hypertask --token "$HT_AGENT_TOKEN" --json comment list "$ticket" 2>/dev/null | python3 -c '
+import sys, json, re
+ticket, state, agent_name, agent_id, scope = sys.argv[1:6]
+seen = set(open(state).read().split())
+fresh = []
+
+def addresses_agent(html):
+    """True only when a mention chip names this agent.
+
+    Humans argue on tickets without needing the agent. Answering those is spam,
+    so a comment counts as ours only if someone actually @-mentioned us.
+    """
+    for chip in re.findall(r"<span[^>]*data-type=\"mention\"[^>]*>", html):
+        if agent_id in chip or ("data-id=\"%s\"" % agent_name) in chip:
+            return True
+    return False
+
+for comment in json.load(sys.stdin).get("comments") or []:
+    ours = ((comment.get("agent") or {}).get("id") == agent_id)
+    legacy = ticket.split("-")[-1]
+    for reaction in comment.get("reactions") or []:
+        rkey = ticket + ":r:" + str(reaction.get("id"))
+        if rkey in seen or legacy + ":r:" + str(reaction.get("id")) in seen:
+            continue
+        seen.add(rkey)
+        if not ours:
+            continue
+        quoted = " ".join(re.sub(r"<[^>]+>", " ", str(comment.get("text") or "")).split())
+        fresh.append("REACTION %s %s on your comment: %s"
+                     % (ticket, reaction.get("emoji"), quoted[:160]))
+    key = ticket + ":" + str(comment.get("id"))
+    if key in seen or legacy + ":" + str(comment.get("id")) in seen:
+        continue
+    seen.add(key)
+    html = str(comment.get("text") or "")
+    mine = addresses_agent(html)
+    if scope != "all" and not mine:
+        continue
+    author = (comment.get("creator") or {}).get("displayName") or "someone"
+    body = " ".join(html.split())
+    fresh.append("%s %s from %s: %s"
+                 % ("ADDRESSED" if mine else "fyi", ticket, author, body[:500]))
+with open(state, "w") as handle:
+    handle.write("\n".join(sorted(seen)) + "\n")
+print("\n".join(fresh), end="")
+' "$ticket" "$state" "$HT_AGENT_NAME" "$HT_AGENT_ID" "$scope" || true
+  done
+}
+
+case "${1:-}" in
+  new)  shift; cmd_new  "$@" ;;
+  say)  shift; cmd_say  "$@" ;;
+  take) shift; cmd_take "$@" ;;
+  drop) shift; cmd_drop "$@" ;;
+  poll) shift; cmd_poll "$@" ;;
+  hand) shift; cmd_hand "$@" ;;
+  new-tickets) shift; cmd_new_tickets "$@" ;;
+  agents) shift; cmd_agents "$@" ;;
+  next) shift; cmd_next "$@" ;;
+  env)  shift; cmd_env  "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  *) sed -n '2,14p' "$0" | sed 's/^# \?//'; exit 1 ;;
+esac

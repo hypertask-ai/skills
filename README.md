@@ -7,6 +7,7 @@ Reusable AI skills for Hypertask writing and processes. Each skill is a self-con
 | Skill | Purpose |
 |---|---|
 | [improve-readability](skills/improve-readability/SKILL.md) | The Hypertask house writing style: NN/g web-scannable, bottom line up front, half the words, nonviolent phrasing. Mirrors the in-app "Improve with AI" prompt (`src/app/api/ai/_lib/editorAi.ts` in the hypertasks repo). |
+| [hypertask-agent](skills/hypertask-agent/SKILL.md) | Run a long-lived AI session as a named Hypertask agent: its own token and display name, ticket comments instead of chat, adaptive polling for replies, and board-hygiene rules (live columns, three-outcomes queue draining, emoji reactions as answers). Ships with the [`ht-agent`](skills/hypertask-agent/ht-agent) helper script. |
 
 ## Usage
 
