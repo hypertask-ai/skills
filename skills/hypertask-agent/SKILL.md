@@ -170,9 +170,19 @@ mutates anything, it carries `--token "$HT_AGENT_TOKEN"`.
    finding and the recommendation, @-mentioning the owner.
 5. **Re-pace, then sleep** by the cadence rule below.
 
-**The scope never gates a reply.** `HT_SCOPE_*` narrows discovery, step 2 only.
-An @-mention reaches this agent whatever column or label the ticket carries.
-`ht-agent poll` already scans the whole board for mentions; do not narrow it.
+**The scope never gates a reply or an assignment.** `HT_SCOPE_*` narrows
+discovery, step 2 only. Two things always reach this agent whatever column,
+label, or view the ticket carries:
+
+- **An @-mention.** `ht-agent poll` already scans the whole board for
+  mentions; do not narrow it.
+- **An assignment.** A ticket assigned to this agent is in its queue, full
+  stop. The surface is what the agent drains on its own initiative; an
+  assignment is the owner pointing at a specific ticket, and it outranks the
+  surface. Work it (or answer on it) like any in-scope ticket, and never skip
+  or ignore it because it sits outside the configured slice. `ht-agent next`
+  already merges assigned tickets into the queue regardless of label for
+  exactly this reason.
 
 ## Cadence: fast while something is happening, slow when nothing is
 
