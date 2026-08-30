@@ -5,6 +5,7 @@
 #   ht-agent say  <slug> <TICKET> '<html>'      post a comment AS the agent
 #   ht-agent take <slug> <TICKET>               assign the agent to a ticket
 #   ht-agent drop <slug> <TICKET>               unassign the agent
+#   ht-agent move <slug> <TICKET> <section>     move a ticket AS the agent
 #   ht-agent poll <slug> [label]                new comments since last poll
 #   ht-agent new-tickets <slug> [label]         tickets in scope not seen before
 #   ht-agent hand <slug> <TICKET> <agent-id>    reassign to another agent
@@ -27,6 +28,15 @@ API="https://api.hypertask.ai/api"
 mkdir -p "$DIR"
 
 die() { echo "ht-agent: $*" >&2; exit 1; }
+guard_capability() {
+  local slug="$1" ticket="${2:-}"
+  [ -z "${HT_CAPABILITY_EXPIRES_AT:-}" ] || [ "$(date +%s)" -le "$HT_CAPABILITY_EXPIRES_AT" ] \
+    || die "ticket capability has expired"
+  [ -z "${HT_CAPABILITY_AGENT_SLUG:-}" ] || [ "$slug" = "$HT_CAPABILITY_AGENT_SLUG" ] \
+    || die "capability is scoped to agent '$HT_CAPABILITY_AGENT_SLUG'"
+  [ -z "${HT_CAPABILITY_TICKET:-}" ] || [ -z "$ticket" ] || [ "$ticket" = "$HT_CAPABILITY_TICKET" ] \
+    || die "capability is scoped to ticket '$HT_CAPABILITY_TICKET'"
+}
 
 # Owner-level API call. Creating or rotating an agent needs a token belonging to
 # the board OWNER (an MCP token from Hypertask Settings -> API), not an agent
@@ -40,6 +50,7 @@ owner() {
 }
 load() {
   local slug="$1"
+  guard_capability "$slug"
   [ -f "$DIR/$slug.env" ] || die "no agent '$slug'. Create one with: ht-agent new $slug \"Name\" 15"
   set -a; . "$DIR/$slug.env"; set +a
 }
@@ -94,12 +105,15 @@ if reason == "agent_token_superseded":
 
 cmd_say() {
   local slug="${1:?slug}" ticket="${2:?TICKET}" html="${3:?html}"
+  guard_capability "$slug" "$ticket"
   load "$slug"
-  local out; out=$(hypertask --token "$HT_AGENT_TOKEN" comment add "$ticket" --text "$html" 2>&1)
+  local out; out=$(HYPERTASKS_JWT_TOKEN="$HT_AGENT_TOKEN" hypertask comment add "$ticket" --text "$html" 2>&1)
   echo "$out" | tail -2
   # Record it as seen: the comment API exposes no agent field, so the agent's own
   # comments look exactly like the owner's and would otherwise poll back as replies.
-  local id; id=$(echo "$out" | grep -o '#comment-[0-9]*' | head -1 | tr -d '#comment-')
+  # Node CLI printed "#comment-123"; the Zig CLI prints JSON with "comment":{"id":123}.
+  local id; id=$(echo "$out" | grep -o '#comment-[0-9]*' | head -1 | tr -dc '0-9' || true)
+  [ -n "$id" ] || id=$(echo "$out" | grep -o '"comment":{"id":[0-9]*' | head -1 | tr -dc '0-9' || true)
   [ -n "$id" ] && echo "${ticket#*-}:$id" >> "$DIR/$slug.seen"
   return 0
 }
@@ -119,8 +133,40 @@ if not data.get("success"):
     sys.exit("failed: " + str(data.get("error")))
 print(data.get("assignStatus"))'
 }
-cmd_take() { load "${1:?slug}"; assign assign   "${2:?TICKET}" "${HT_AGENT_PROJECTS%%,*}"; }
-cmd_drop() { load "${1:?slug}"; assign unassign "${2:?TICKET}" "${HT_AGENT_PROJECTS%%,*}"; }
+cmd_take() {
+  local slug="${1:?slug}" ticket="${2:?TICKET}"
+  guard_capability "$slug" "$ticket"
+  load "$slug"
+  # Assign sits behind the per-task mutation lease, same as hand and drop.
+  local project="${HT_AGENT_PROJECTS%%,*}" index="${ticket#*-}" task_id
+  task_id=$(curl -s "$API/mcp/tasks?project_id=$project&unique_index=$index" -H "Authorization: Bearer $HT_AGENT_TOKEN" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); t=d.get("task") or (d.get("tasks") or [{}])[0]; print(t.get("id") or "")')
+  [ -n "$task_id" ] || { echo "take: could not resolve task id for $ticket" >&2; return 1; }
+  curl -s -X POST "$API/mcp/tasks/lease/claim" -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" \
+    -d "{\"task_id\":$task_id,\"ttl_seconds\":120}" >/dev/null
+  trap 'curl -s -X POST "$API/mcp/tasks/lease/release" -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" -d "{\"task_id\":$task_id}" >/dev/null' RETURN
+  assign assign "$ticket" "$project"
+}
+cmd_drop() {
+  local slug="${1:?slug}" ticket="${2:?TICKET}"
+  guard_capability "$slug" "$ticket"
+  load "$slug"
+  # Unassign sits behind the per-task mutation lease, same as hand (2026-08-23).
+  local project="${HT_AGENT_PROJECTS%%,*}" index="${ticket#*-}" task_id
+  task_id=$(curl -s "$API/mcp/tasks?project_id=$project&unique_index=$index" -H "Authorization: Bearer $HT_AGENT_TOKEN" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); t=d.get("task") or (d.get("tasks") or [{}])[0]; print(t.get("id") or "")')
+  [ -n "$task_id" ] || { echo "drop: could not resolve task id for $ticket" >&2; return 1; }
+  curl -s -X POST "$API/mcp/tasks/lease/claim" -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" \
+    -d "{\"task_id\":$task_id,\"ttl_seconds\":120}" >/dev/null
+  trap 'curl -s -X POST "$API/mcp/tasks/lease/release" -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" -d "{\"task_id\":$task_id}" >/dev/null' RETURN
+  assign unassign "$ticket" "$project"
+}
+cmd_move() {
+  local slug="${1:?slug}" ticket="${2:?TICKET}" section="${3:?section}"
+  guard_capability "$slug" "$ticket"
+  load "$slug"
+  HYPERTASKS_JWT_TOKEN="$HT_AGENT_TOKEN" hypertask tasks move "$ticket" --section "$section"
+}
 
 # Hand a ticket to a different agent, e.g. filing a CLI/API bug against the agent
 # that owns that surface. The route takes agent_id; only the CLI cannot.
@@ -131,8 +177,18 @@ cmd_drop() { load "${1:?slug}"; assign unassign "${2:?TICKET}" "${HT_AGENT_PROJE
 # Pass --add as a 4th arg to keep the existing agents instead.
 cmd_hand() {
   local slug="${1:?slug}" ticket="${2:?TICKET}" target="${3:?target agent id}" mode="${4:-}"
+  guard_capability "$slug" "$ticket"
   load "$slug"
-  local project="${HT_AGENT_PROJECTS%%,*}" index="${ticket#*-}" stale others
+  local project="${HT_AGENT_PROJECTS%%,*}" index="${ticket#*-}" stale others task_id
+  # The assign route now sits behind the per-task mutation lease (2026-08-23).
+  # Claim it for this hand, release it after; without it every hand fails
+  # with "Caller holds no agent mutation lease".
+  task_id=$(curl -s "$API/mcp/tasks?project_id=$project&unique_index=$index" -H "Authorization: Bearer $HT_AGENT_TOKEN" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); t=d.get("task") or (d.get("tasks") or [{}])[0]; print(t.get("id") or "")')
+  [ -n "$task_id" ] || { echo "hand: could not resolve task id for $ticket" >&2; return 1; }
+  curl -s -X POST "$API/mcp/tasks/lease/claim" -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" \
+    -d "{\"task_id\":$task_id,\"ttl_seconds\":120}" >/dev/null
+  trap 'curl -s -X POST "$API/mcp/tasks/lease/release" -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" -d "{\"task_id\":$task_id}" >/dev/null' RETURN
   others=$(curl -s -X POST "$API/mcp/assignees/assign" \
     -H "Authorization: Bearer $HT_AGENT_TOKEN" -H "Content-Type: application/json" \
     -d "{\"project_id\":$project,\"unique_index\":$index,\"agent_id\":\"$target\",\"intent\":\"assign\"}" \
@@ -153,8 +209,13 @@ print("\n".join(stale))') || return 1
   [ "$mode" = "--add" ] && return 0
   while read -r stale; do
     [ -n "$stale" ] || continue
-    hypertask --token "$HT_AGENT_TOKEN" tasks unassign "$ticket" --assignee "$stale" >/dev/null 2>&1 \
-      && echo "dropped previous agent $stale" >&2
+    if HYPERTASKS_JWT_TOKEN="$HT_AGENT_TOKEN" hypertask tasks unassign "$ticket" --assignee "$stale" >/dev/null 2>&1; then
+      echo "dropped previous agent $stale" >&2
+    else
+      # A half-completed hand IS the double-assignment bug (HTPR-5685): fail loud.
+      echo "hand: FAILED to unassign previous agent $stale from $ticket; ticket is double-assigned" >&2
+      return 1
+    fi
   done <<< "$others"
 }
 
@@ -168,11 +229,9 @@ cmd_next() {
   # assigned tickets for a whole session.
   local labelled="{}" assigned="{}"
   if [ -n "$label" ]; then
-    labelled=$(hypertask --token "$HT_AGENT_TOKEN" --json tasks list \
-      --project "${HT_AGENT_PROJECTS%%,*}" --limit 100 --label "$label" 2>/dev/null)
+    labelled=$(HT_TOKEN="$HT_AGENT_TOKEN" ht GET "/mcp/tasks?project_id=${HT_AGENT_PROJECTS%%,*}&limit=100&labels=$label" 2>/dev/null)
   fi
-  assigned=$(hypertask --token "$HT_AGENT_TOKEN" --json tasks list \
-    --project "${HT_AGENT_PROJECTS%%,*}" --limit 100 2>/dev/null)
+  assigned=$(HT_TOKEN="$HT_AGENT_TOKEN" ht GET "/mcp/tasks?project_id=${HT_AGENT_PROJECTS%%,*}&limit=100" 2>/dev/null)
   printf '%s\n\x00\n%s\n' "$labelled" "$assigned" | python3 -c '
 import os, sys, json
 from datetime import datetime, timezone
@@ -336,11 +395,14 @@ print((stamp - datetime.timedelta(hours=hours)).isoformat().replace("+00:00", "Z
 ' < "$watermark")
   fi
 
-  local args=(--token "$HT_AGENT_TOKEN" --json tasks list --project "$project" --limit 100)
   local tickets
   # ticketNumber, not uniqueIndex: "HTPR-$index" reads comments from the wrong
   # board for any non-product-board agent.
-  tickets=$(hypertask "${args[@]}" 2>/dev/null | SINCE="$since" python3 -c '
+  # Direct REST (owner, 2026-08-26): each hypertask CLI call booted a full Node
+  # runtime, and this scan plus the per-ticket comment fetches below were the
+  # single largest CPU consumer on the box. Same endpoint, same JSON shape,
+  # sorted newest-updated first by default.
+  tickets=$(HT_TOKEN="$HT_AGENT_TOKEN" ht GET "/mcp/tasks?project_id=$project&limit=100&sort_by=updatedAt&sort_order=desc" 2>/dev/null | SINCE="$since" python3 -c '
 import sys, json, os
 since = os.environ.get("SINCE") or ""
 newest = since
@@ -373,7 +435,7 @@ if best:
   rm -f "$watermark.next"
 
   for ticket in $tickets; do
-    hypertask --token "$HT_AGENT_TOKEN" --json comment list "$ticket" 2>/dev/null | python3 -c '
+    HT_TOKEN="$HT_AGENT_TOKEN" ht GET "/mcp/comments?project_id=$project&unique_index=${ticket#*-}" 2>/dev/null | python3 -c '
 import sys, json, re
 ticket, state, agent_name, agent_id, scope = sys.argv[1:6]
 seen = set(open(state).read().split())
@@ -413,8 +475,8 @@ for comment in json.load(sys.stdin).get("comments") or []:
         continue
     author = (comment.get("creator") or {}).get("displayName") or "someone"
     body = " ".join(html.split())
-    fresh.append("%s %s from %s: %s"
-                 % ("ADDRESSED" if mine else "fyi", ticket, author, body[:500]))
+    fresh.append("%s %s commentId=%s from %s: %s"
+                 % ("ADDRESSED" if mine else "fyi", ticket, comment.get("id"), author, body[:500]))
 with open(state, "w") as handle:
     handle.write("\n".join(sorted(seen)) + "\n")
 print("\n".join(fresh), end="")
@@ -427,6 +489,7 @@ case "${1:-}" in
   say)  shift; cmd_say  "$@" ;;
   take) shift; cmd_take "$@" ;;
   drop) shift; cmd_drop "$@" ;;
+  move) shift; cmd_move "$@" ;;
   poll) shift; cmd_poll "$@" ;;
   hand) shift; cmd_hand "$@" ;;
   new-tickets) shift; cmd_new_tickets "$@" ;;
