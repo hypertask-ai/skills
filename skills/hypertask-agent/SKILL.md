@@ -10,12 +10,12 @@ and display name, so its comments and assignments show up as **the agent**, not
 as the human who launched it. The owner assigns tickets, the agent works them,
 and the two talk through ticket comments instead of the terminal.
 
-All of it runs through one tool: `ht-agent` (the script in this skill's
-directory; put it on your `PATH`, e.g. `~/.local/bin/ht-agent`). It needs the
-[`hypertask` CLI](https://www.npmjs.com/package/@hypertask/hypertask_cli)
-(`npm i -g @hypertask/hypertask_cli`), plus an owner MCP token in
-`HT_OWNER_TOKEN` for the one-time identity creation (Hypertask → Settings →
-API).
+All identity operations run through the native
+[`hypertask` CLI](https://github.com/hypertask-ai/cli). The `hypertask agent`
+commands use `--token`, `HT_AGENT_TOKEN`, `HT_TOKEN`, or
+`HYPERTASKS_JWT_TOKEN`; no shell wrapper parses their output. One-time identity
+creation uses `hypertask agents create` with `HYPERTASK_MANAGEMENT_KEY` from
+Hypertask → Settings → API.
 
 ## Step 0: ask what this deployment is, before anything else
 
@@ -35,7 +35,7 @@ actual section names as options rather than making them type names in.
 
 **Scope questions**
 
-1. **Which board?** Default to the board already in `HT_AGENT_PROJECTS` if an
+1. **Which board?** Default to the board already in `HT_AGENT_PROJECT_ID` if an
    identity is being reused.
 2. **Which slice of it?** A column, a label, everything assigned to this agent,
    or the whole board. Offer the real sections read above.
@@ -61,6 +61,8 @@ sibling of the identity file, never inside it:
 ```bash
 cat > ~/.config/hypertask-agents/<slug>.conf <<'EOF'
 HT_BOARD=42
+HT_AGENT_PROJECT_ID=42
+HT_AGENT_STATE_DIR="$HOME/.local/state/hypertask-<slug>/agent-cli"
 HT_SCOPE_KIND=section            # section | label | assigned | board
 HT_SCOPE_VALUE="Ready for Development"
 HT_START_SECTIONS="Ready for Development"
@@ -91,15 +93,13 @@ can be inferred. Decide in this order:
 3. **Identities exist for the chosen board** → list them and ask reuse or new.
 4. **None exist for it** → create one, and say the display name you picked.
 
-`ht-agent new` refuses to overwrite an existing `<slug>.env`, so creation can
-never clobber a live token. That is a safety net, not a substitute for asking.
+Never overwrite an existing `<slug>.env`. Agent tokens are shown once, so check
+for an existing identity before running `hypertask agents create`.
 
 ### One board per identity
 
-Every `ht-agent` subcommand takes only the first entry of `HT_AGENT_PROJECTS`.
-Passing several board ids at creation makes the agent silently work the first
-and ignore the rest. **One board per identity**; a second board means a second
-identity.
+Set exactly one `HT_AGENT_PROJECT_ID` for polling and discovery. **One board
+per identity**; a second board means a second identity.
 
 ## Step 1: give yourself a loop
 
@@ -111,9 +111,9 @@ loop, hand them the exact line to paste and say what each iteration will do.
 Every iteration begins the same way, before any new work:
 
 ```bash
-ht-agent poll        <slug>   # replies that @-mention this agent
-ht-agent new-tickets <slug>   # work that appeared since the last pass
-ht-agent next        <slug>   # what to pick up, due date then priority
+hypertask agent poll                         # replies that @-mention this agent
+hypertask agent new-tickets                  # work that appeared since the last pass
+hypertask task next --project "$HT_AGENT_PROJECT_ID" # due date then priority
 ```
 
 An instruction in a reply outranks the queue order. Handle it first.
@@ -121,13 +121,14 @@ An instruction in a reply outranks the queue order. Handle it first.
 ## Step 2: set the identity up (once per session role)
 
 ```bash
-ht-agent new mobile-developer "Mobile Developer" 42   # slug, display name, board id
+hypertask agents create --name "Mobile Developer" --project 42
 ```
 
-Creating it mints a token that is **shown once**. `ht-agent` writes it to
-`~/.config/hypertask-agents/<slug>.env` at 0600, which becomes the only copy.
-Rotate through `/api/mcp/agents/rotate-token` if it ever leaks. The token is
-scoped to the board passed in, so it cannot touch anything else.
+Creation prints the managed agent ID and a bearer token **once**. Save them
+immediately in `~/.config/hypertask-agents/mobile-developer.env` with mode 0600
+as `HT_AGENT_SLUG`, `HT_AGENT_NAME`, `HT_AGENT_ID`, and `HT_AGENT_TOKEN`. Never
+put the token in the deployment `.conf`, a repository, or a command argument.
+Rotate it with `hypertask agents rotate-token --id "$HT_AGENT_ID"` if it leaks.
 
 Then give the agent a tab on the board so the owner can see its queue:
 
@@ -146,9 +147,9 @@ Everything that changes the board goes out under the agent token, so the board
 shows the agent speaking and not its owner:
 
 ```bash
-ht-agent say  <slug> <TICKET> '<p>…</p>'
-ht-agent take <slug> <TICKET>
-hypertask --token "$HT_AGENT_TOKEN" tasks move <TICKET> --section "$HT_PROGRESS_SECTION"
+hypertask agent say  <TICKET> '<p>…</p>'
+hypertask agent take <TICKET>
+hypertask agent move <TICKET> "$HT_PROGRESS_SECTION"
 ```
 
 **The rule is about writes, not about which binary.** A bare `hypertask` call
@@ -159,9 +160,9 @@ mutates anything, it carries `--token "$HT_AGENT_TOKEN"`.
 
 ## What each iteration does, once configured
 
-1. **Poll for replies** — `ht-agent poll <slug>`. Answer anything that
+1. **Poll for replies** — `hypertask agent poll`. Answer anything that
    @-mentions the agent before touching the queue.
-2. **Look for new work in scope** — `ht-agent new-tickets <slug>`, and for a
+2. **Look for new work in scope** — `hypertask agent new-tickets`, and for a
    section or label scope, `hypertask --token "$HT_AGENT_TOKEN" tasks list
    --project "$HT_BOARD" --section "$HT_SCOPE_VALUE"`.
 3. **Move the ticket to `$HT_PROGRESS_SECTION` before the first edit**, and out
@@ -174,15 +175,20 @@ mutates anything, it carries `--token "$HT_AGENT_TOKEN"`.
 discovery, step 2 only. Two things always reach this agent whatever column,
 label, or view the ticket carries:
 
-- **An @-mention.** `ht-agent poll` already scans the whole board for
+- **An @-mention.** `hypertask agent poll` already scans the whole board for
   mentions; do not narrow it.
 - **An assignment.** A ticket assigned to this agent is in its queue, full
   stop. The surface is what the agent drains on its own initiative; an
   assignment is the owner pointing at a specific ticket, and it outranks the
   surface. Work it (or answer on it) like any in-scope ticket, and never skip
-  or ignore it because it sits outside the configured slice. `ht-agent next`
-  already merges assigned tickets into the queue regardless of label for
-  exactly this reason.
+  or ignore it because it sits outside the configured slice. Merge this query
+  into discovery results so a label filter cannot hide explicit assignments:
+
+  ```bash
+  hypertask --json task list --project "$HT_AGENT_PROJECT_ID" --limit 100 |
+    jq --arg id "$HT_AGENT_ID" \
+      '.tasks[] | select(any(.assignees[]?; .agent.id == $id))'
+  ```
 
 ## Cadence: fast while something is happening, slow when nothing is
 
@@ -324,9 +330,9 @@ the comment asked, and say how you took it so a wrong read is cheap to correct.
 human discussion the agent is not part of, and a board with several agents on
 one ticket turns into noise fast if every agent answers everything.
 
-`ht-agent poll` enforces this: it surfaces only comments whose mention chips
-name this agent, marks the rest as read, and stays silent about them.
-`ht-agent poll <slug> --all` shows everything for the rare case the agent needs
+`hypertask agent poll` enforces this: it surfaces only comments whose mention
+chips name this agent, marks the rest as read, and stays silent about them.
+`hypertask agent poll --all` shows everything for the rare case the agent needs
 the full thread.
 
 So: read for context, but do not post unless mentioned, the ticket is assigned
@@ -339,10 +345,9 @@ When in doubt, stay quiet.
 so `hypertask inbox list` returns the *owner's own* inbox across every board.
 Reading it is noise, and archiving from it mutates their real inbox.
 
-The comment API exposes no agent field, so the agent's own comments look
-exactly like the owner's. `ht-agent say` records each one as seen at post time,
-which is what keeps the agent from answering itself. Always post through
-`ht-agent say`, never a raw `hypertask comment add`.
+`hypertask agent say` records each agent-authored comment as seen at post time,
+which keeps the agent from answering itself. Always use it instead of a raw
+`hypertask comment add`.
 
 ## Traps that cost real time
 
@@ -351,14 +356,14 @@ marks a comment read whether or not you acted on it. Before reporting any
 ticket as parked or waiting, re-read its thread and check whether the newest
 comment is the owner's rather than yours.
 
-**Never pipe `ht-agent poll` through `head` or `tail`.** The default output is
-already filtered and short. Truncating `--all` output silently discards the
-very reply you were looking for while the tool marks it read.
+**Never pipe `hypertask agent poll` through `head` or `tail`.** The default
+output is already filtered and short. Truncating `--all` output silently
+discards the very reply you were looking for while the tool marks it read.
 
 **Address tickets by project + ticket number, never by internal id.** The API's
 `task_id` field is an internal database id; passing a ticket number there
-writes to an unrelated task and returns success. `ht-agent` always uses
-`project_id` + `unique_index`.
+writes to an unrelated task and returns success. Native agent commands resolve
+the ticket before mutating it.
 
 **`tasks update --labels` REPLACES the whole label set.** There is no additive
 label command; send the full desired list or the rest is silently dropped.
