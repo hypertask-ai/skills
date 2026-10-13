@@ -17,3 +17,7 @@ Reusable AI skills for Hypertask writing and processes. Each skill is a self-con
 ## Keeping in sync
 
 The in-app source of truth is `HOUSE_OUTPUT_STYLE` + the `ImproveReadability` prompt in the hypertasks repo (`src/app/api/ai/_lib/editorAi.ts`, shipped in HTPR-4313). If that changes, update the skill here.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, ideas, and our contribution policy.
