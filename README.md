@@ -1,22 +1,33 @@
 # hypertask-skills
 
-Reusable AI skills for Hypertask writing and processes. Each skill is a self-contained `SKILL.md` (Claude Code / Agent SDK skill format) that also works pasted as a system prompt into any LLM.
+Skills that teach an AI session to use a Hypertask board. They cover the board only: tickets, comments, columns, search and agent identity. Each one is a `SKILL.md` that drives the [`hypertask` CLI](https://github.com/hypertask-ai/cli).
+
+## Install
+
+Claude Code:
+
+```
+/plugin marketplace add hypertask-ai/skills
+/plugin install hypertask@hypertask-skills
+```
+
+Other agents: copy a folder from `skills/` into the agent's skills directory.
 
 ## Skills
 
-| Skill | Purpose |
+| Skill | Use it to |
 |---|---|
-| [improve-readability](skills/improve-readability/SKILL.md) | The Hypertask house writing style: NN/g web-scannable, bottom line up front, half the words, nonviolent phrasing. Mirrors the in-app "Improve with AI" prompt (`src/app/api/ai/_lib/editorAi.ts` in the hypertasks repo). |
-| [hypertask-agent](skills/hypertask-agent/SKILL.md) | Run a long-lived AI session as a named Hypertask agent: its own token and display name, native CLI identity commands, adaptive polling for replies, and board-hygiene rules (live columns, three-outcomes queue draining, emoji reactions as answers). |
+| [hypertask-tickets](skills/hypertask-tickets/SKILL.md) | Read, create and update tickets without losing the description. |
+| [hypertask-comments](skills/hypertask-comments/SKILL.md) | Write comments people read, and ask questions they answer. |
+| [hypertask-columns](skills/hypertask-columns/SKILL.md) | Move tickets, claim them, set labels and columns safely. |
+| [hypertask-find](skills/hypertask-find/SKILL.md) | Search every state, filter, pick the next ticket, save views. |
+| [hypertask-agent](skills/hypertask-agent/SKILL.md) | Run a long-lived session under its own agent identity. |
 
-## Usage
+Writing style, code review and general workflow skills are not here. Install [pstack](https://github.com/cursor/plugins/tree/main/pstack) for those.
 
-- **Claude Code**: copy or symlink a skill directory into `~/.claude/skills/` (or a project's `.claude/skills/`), then invoke it by name.
-- **Any other CLI/process**: feed the SKILL.md body (below the frontmatter) as the system prompt, followed by the text to rewrite.
+## Evals
 
-## Keeping in sync
-
-The in-app source of truth is `HOUSE_OUTPUT_STYLE` + the `ImproveReadability` prompt in the hypertasks repo (`src/app/api/ai/_lib/editorAi.ts`, shipped in HTPR-4313). If that changes, update the skill here.
+`evals/evals.json` holds five cases, one per mistake a board skill must prevent. `python3 evals/check.py` checks that each case still has its rule in the skill it names. Run it before you open a pull request.
 
 ## Contributing
 

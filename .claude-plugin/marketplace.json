@@ -1,0 +1,15 @@
+{
+  "$schema": "https://www.schemastore.org/claude-code-marketplace.json",
+  "name": "hypertask-skills",
+  "description": "Board skills for the Hypertask CLI.",
+  "owner": { "name": "Hypertask" },
+  "plugins": [
+    {
+      "name": "hypertask",
+      "version": "1.0.0",
+      "description": "Tickets, comments, columns, search and agent identity on Hypertask boards.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
