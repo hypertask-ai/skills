@@ -1,34 +1,32 @@
-# hypertask-skills
+# Hypertask skills
 
-Skills that teach an AI session to use a Hypertask board. They cover the board only: tickets, comments, columns, search and agent identity. Each one is a `SKILL.md` that drives the [`hypertask` CLI](https://github.com/hypertask-ai/cli).
+Teach your AI agent to work a Hypertask board: read, create and move tickets, comment, search.
 
 ## Install
 
-Claude Code:
+1. Install the CLI and log in:
+   ```
+   curl -fsSL https://raw.githubusercontent.com/hypertask-ai/cli/main/scripts/install.sh | sh && hypertask login
+   ```
+2. Add the skills. In Claude Code:
+   ```
+   /plugin marketplace add hypertask-ai/skills
+   /plugin install hypertask@hypertask-skills
+   ```
+   Any other agent: `git clone --depth 1 https://github.com/hypertask-ai/skills && cp -r skills/skills/* <your agent's skills folder>`
 
-```
-/plugin marketplace add hypertask-ai/skills
-/plugin install hypertask@hypertask-skills
-```
+## Try it
 
-Other agents: copy a folder from `skills/` into the agent's skills directory.
+Ask your agent: *"Find ticket PROJ-1, move it to In Progress, and comment that you started."*
 
 ## Skills
 
 | Skill | Use it to |
 |---|---|
-| [hypertask-tickets](skills/hypertask-tickets/SKILL.md) | Read, create and update tickets without losing the description. |
-| [hypertask-comments](skills/hypertask-comments/SKILL.md) | Write comments people read, and ask questions they answer. |
-| [hypertask-columns](skills/hypertask-columns/SKILL.md) | Move tickets, claim them, set labels and columns safely. |
-| [hypertask-find](skills/hypertask-find/SKILL.md) | Search every state, filter, pick the next ticket, save views. |
-| [hypertask-agent](skills/hypertask-agent/SKILL.md) | Run a long-lived session under its own agent identity. |
+| `hypertask-tickets` | Read, create and update tickets |
+| `hypertask-comments` | Comment and ask questions people answer |
+| `hypertask-columns` | Move, claim, label |
+| `hypertask-find` | Search, filter, pick the next ticket |
+| `hypertask-agent` | Work under its own agent identity |
 
-Writing style, code review and general workflow skills are not here. Install [pstack](https://github.com/cursor/plugins/tree/main/pstack) for those.
-
-## Evals
-
-`evals/evals.json` holds five cases, one per mistake a board skill must prevent. `python3 evals/check.py` checks that each case still has its rule in the skill it names. Run it before you open a pull request.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, ideas, and our contribution policy.
+Bugs and ideas: [CONTRIBUTING.md](CONTRIBUTING.md). Evals: `python3 evals/check.py`.
