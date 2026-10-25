@@ -1,0 +1,10 @@
+{
+  "name": "hypertask",
+  "version": "1.0.0",
+  "description": "Use Hypertask boards from an AI session: tickets, comments, columns and labels, search and views, and a named agent identity.",
+  "author": { "name": "Hypertask" },
+  "homepage": "https://github.com/hypertask-ai/skills",
+  "repository": "https://github.com/hypertask-ai/skills",
+  "license": "MIT",
+  "keywords": ["hypertask", "board", "tickets", "cli"]
+}

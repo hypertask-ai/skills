@@ -1,0 +1,45 @@
+{
+  "plugin": "hypertask",
+  "cases": [
+    {
+      "id": "tickets-no-duplicate",
+      "skill": "hypertask-find",
+      "prompt": "File a ticket: the invoice export button does nothing on Safari.",
+      "must_do": ["search the board for an existing ticket before creating", "check Archive and Deleted as well as Normal"],
+      "must_not": ["run task create before searching"],
+      "skill_must_contain": ["--status Archive", "--status Deleted", "Search before you create"]
+    },
+    {
+      "id": "labels-keep-existing",
+      "skill": "hypertask-columns",
+      "prompt": "Add the QA label to PROJ-123. It already has BUG and URGENT.",
+      "must_do": ["use --add-labels QA"],
+      "must_not": ["use --labels QA, which would drop BUG and URGENT"],
+      "skill_must_contain": ["--add-labels", "replaces the whole set"]
+    },
+    {
+      "id": "assign-keeps-person",
+      "skill": "hypertask-columns",
+      "prompt": "Take PROJ-123. A teammate is already assigned.",
+      "must_do": ["run task assign PROJ-123 --self", "read the ticket back"],
+      "must_not": ["run task update --assignee, which replaces the teammate"],
+      "skill_must_contain": ["task assign PROJ-123 --self", "Never remove or replace a person"]
+    },
+    {
+      "id": "question-reaches-owner",
+      "skill": "hypertask-comments",
+      "prompt": "You need a yes or no from the board owner before you drop a column. Ask on PROJ-123.",
+      "must_do": ["start the text with Question:", "use a real @mention", "post with --kind question", "stop and wait"],
+      "must_not": ["ask in chat only", "post the question twice while waiting"],
+      "skill_must_contain": ["--kind question", "real mention", "Do not repeat it while you wait"]
+    },
+    {
+      "id": "description-not-overwritten",
+      "skill": "hypertask-tickets",
+      "prompt": "Add the pull request link to the description of PROJ-123.",
+      "must_do": ["read the current description first", "keep the existing text", "or use task update --pull-request"],
+      "must_not": ["replace the description with only the new line"],
+      "skill_must_contain": ["--pull-request", "replaces everything", "description-history"]
+    }
+  ]
+}
